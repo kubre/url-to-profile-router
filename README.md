@@ -1,34 +1,21 @@
-# url-to-profile-router
+# URL to Profile Router
 
 Tiny Velja/Choosy clone. One Swift file, no dependencies. Routes URLs to Helium profiles.
 
 - `github.com` → Helium profile `tars`
 - `youtube.com`, `youtu.be` → Helium profile `persoanl`
-- everything else → Helium default (last used profile)
+- local files, everything else → Helium default (last used profile)
 
 Edit rules in `~/.config/url-router.json` (created on first run from `rules.json`).
 
-## Build
-
-```
-./build.sh
-```
-
-Makes `build/Router.app`.
-
 ## Install
 
-1. Copy `build/Router.app` to `/Applications`.
-2. System Settings → Desktop & Dock → Default web browser → Router.
-3. Click a link. Done.
-
-CLI for testing:
-
 ```
-./build/Router.app/Contents/MacOS/Router --dry-run https://github.com/foo
-./build/Router.app/Contents/MacOS/Router --list-profiles
-./build/Router.app/Contents/MacOS/Router --set-default
+./install.sh
 ```
+
+Then System Settings → Desktop & Dock → Default web browser → **URL to Profile Router**
+(look between Microsoft Edge and Safari; fully quit Settings with Cmd+Q first if the list looks stale).
 
 ## Add more rules
 
@@ -44,3 +31,18 @@ CLI for testing:
 
 Match is suffix-based: `figma.com` also matches `www.figma.com`. First match wins.
 `fallbackProfile: "tars"` forces all unmatched URLs into that profile instead of Helium default.
+
+## Test without changing your default browser
+
+```
+"/Applications/URL to Profile Router.app/Contents/MacOS/Router" --dry-run https://github.com/foo
+"/Applications/URL to Profile Router.app/Contents/MacOS/Router" --list-profiles
+```
+
+## Files
+
+- `main.swift` — the whole app
+- `Info.plist` — browser registration (http/https/file schemes, public.html)
+- `icon.swift` — draws the app icon at build time (repo stays source-only)
+- `rules.json` — default config template
+- `build.sh` / `install.sh` — build, sign, install, register
