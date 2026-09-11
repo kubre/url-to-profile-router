@@ -1,0 +1,129 @@
+import AppKit
+import CoreServices
+
+struct Rule: Decodable { var host: String; var profile: String }
+struct Config: Decodable { var browser: String?; var rules: [Rule]; var fallbackProfile: String? }
+
+let fm = FileManager.default
+let home = NSHomeDirectory()
+let configPath = home + "/.config/url-router.json"
+let heliumSupport = home + "/Library/Application Support/net.imput.helium"
+let defaultBrowserID = "net.imput.helium"
+
+func defaultConfig() -> String {
+    let url = Bundle.main.url(forResource: "rules", withExtension: "json")
+    if let u = url, let s = try? String(contentsOf: u, encoding: .utf8) { return s }
+    if let u = URL(string: "file://" + FileManager.default.currentDirectoryPath + "/rules.json"),
+       let s = try? String(contentsOf: u, encoding: .utf8) { return s }
+    return #"{"browser":"\#(defaultBrowserID)","rules":[{"host":"github.com","profile":"tars"},{"host":"youtube.com","profile":"persoanl"},{"host":"youtu.be","profile":"persoanl"}],"fallbackProfile":null}"#
+}
+
+func loadConfig() -> Config {
+    if !fm.fileExists(atPath: configPath) {
+        try? fm.createDirectory(atPath: (configPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try? defaultConfig().write(toFile: configPath, atomically: true, encoding: .utf8)
+    }
+    if let data = fm.contents(atPath: configPath),
+       let cfg = try? JSONDecoder().decode(Config.self, from: data) { return cfg }
+    let data = defaultConfig().data(using: .utf8)!
+    return (try? JSONDecoder().decode(Config.self, from: data)) ?? Config(browser: defaultBrowserID, rules: [], fallbackProfile: nil)
+}
+
+func heliumProfiles() -> [String: String] {
+    let state = heliumSupport + "/Local State"
+    guard let data = fm.contents(atPath: state),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let profile = json["profile"] as? [String: Any],
+          let cache = profile["info_cache"] as? [String: Any] else { return [:] }
+    var out: [String: String] = [:]
+    for (dir, info) in cache {
+        if let name = (info as? [String: Any])?["name"] as? String { out[name] = dir }
+    }
+    return out
+}
+
+func profileDir(for name: String) -> String? {
+    let profiles = heliumProfiles()
+    if let exact = profiles[name] { return exact }
+    let lower = name.lowercased()
+    for (n, dir) in profiles where n.lowercased() == lower { return dir }
+    return nil
+}
+
+func matchProfile(host: String, cfg: Config) -> String? {
+    let h = host.lowercased()
+    for rule in cfg.rules {
+        let p = rule.host.lowercased().trimmingCharacters(in: .init(charactersIn: "."))
+        if h == p || h.hasSuffix("." + p) { return rule.profile }
+    }
+    return cfg.fallbackProfile
+}
+
+func openURL(_ urlString: String, dryRun: Bool = false) {
+    guard let url = URL(string: urlString), let host = url.host else { return }
+    let cfg = loadConfig()
+    let browserID = (cfg.browser?.isEmpty == false) ? cfg.browser! : defaultBrowserID
+    let profile = matchProfile(host: host, cfg: cfg)
+    var dir: String? = nil
+    if let p = profile { dir = profileDir(for: p) ?? p }
+    if dryRun {
+        print("\(urlString) -> \(browserID) profile=\(profile ?? "(default)") dir=\(dir ?? "(default)")")
+        return
+    }
+    guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
+        ?? URL(fileURLWithPath: "/Applications/Helium.app") else { return }
+    let conf = NSWorkspace.OpenConfiguration()
+    conf.activates = true
+    if let d = dir { conf.arguments = ["--profile-directory=\(d)", urlString] }
+    else { conf.arguments = [urlString] }
+    NSWorkspace.shared.openApplication(at: appURL, configuration: conf) { _, _ in }
+}
+
+class Delegate: NSObject, NSApplicationDelegate {
+    var idle: Timer?
+    func applicationDidFinishLaunching(_ n: Notification) {
+        NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:withReply:)), forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+        armIdle()
+    }
+    func application(_ app: NSApplication, open urls: [URL]) {
+        for u in urls { openURL(u.absoluteString) }
+        armIdle()
+    }
+    @objc func handleURL(_ event: NSAppleEventDescriptor, withReply: NSAppleEventDescriptor) {
+        if let s = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue { openURL(s) }
+        armIdle()
+    }
+    func armIdle() {
+        idle?.invalidate()
+        idle = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { _ in NSApp.terminate(nil) }
+    }
+}
+
+let args = CommandLine.arguments
+if args.contains("--list-profiles") {
+    for (name, dir) in heliumProfiles().sorted(by: { $0.key < $1.key }) { print("\(name) -> \(dir)") }
+    exit(0)
+}
+if args.contains("--set-default") {
+    let id = Bundle.main.bundleIdentifier ?? "com.vaibhav.urlrouter" as CFString
+    LSSetDefaultHandlerForURLScheme("http" as CFString, id as CFString)
+    LSSetDefaultHandlerForURLScheme("https" as CFString, id as CFString)
+    print("set default browser to \(id) (if nothing changed, set it in System Settings → Desktop & Dock)")
+    exit(0)
+}
+let urls = args.dropFirst().filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
+if args.contains("--dry-run") || !urls.isEmpty {
+    let dry = args.contains("--dry-run")
+    if urls.isEmpty, dry {
+        for sample in ["https://github.com/foo", "https://www.youtube.com/watch?v=x", "https://youtu.be/x", "https://example.com"] { openURL(sample, dryRun: true) }
+    } else {
+        for u in urls { openURL(u, dryRun: dry) }
+        if !dry { sleep(2) }
+    }
+    exit(0)
+}
+
+let app = NSApplication.shared
+let delegate = Delegate()
+app.delegate = delegate
+app.run()
