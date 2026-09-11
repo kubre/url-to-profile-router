@@ -1,50 +1,40 @@
 # URL to Profile Router
 
-Tiny Velja/Choosy clone. One Swift file, no dependencies. Routes URLs to Helium profiles.
-
-- `github.com` → Helium profile `tars`
-- `youtube.com`, `youtu.be` → Helium profile `persoanl`
-- local files, everything else → Helium default (last used profile)
-
-Edit rules in `~/.config/url-router.conf` (created on first run from `rules.conf`).
-Plain text, one rule per line — no JSON anywhere in this project.
+Tiny native macOS URL router. No dependencies. Sends domains to existing Chromium profiles.
 
 ## Install
 
-```
+```sh
 ./install.sh
 ```
 
-Then System Settings → Desktop & Dock → Default web browser → **URL to Profile Router**
-(look between Microsoft Edge and Safari; fully quit Settings with Cmd+Q first if the list looks stale).
+Then select **URL to Profile Router** as the default browser in System Settings.
 
-## Add more rules
+Rules live at `~/.config/url-router.conf` and are created on first use:
 
-`~/.config/url-router.conf`:
+```text
+# domain profile — first match wins; subdomains match too
+github.com tars
+youtube.com persoanl
 
-```
-# <domain> <helium-profile>, first match wins
-figma.com tars
-
-# optional directives:
-# @browser net.imput.helium
+# optional
+# @browser com.google.Chrome
 # @fallback tars
 ```
 
-Match is suffix-based: `figma.com` also matches `www.figma.com`. First match wins.
-`fallbackProfile: "tars"` forces all unmatched URLs into that profile instead of Helium default.
+Supported browser bundle IDs: Helium, Chrome, Chromium, Brave, Edge and Vivaldi. Profile names must already exist; the router never creates profiles from typos. Local files use the browser's last-used profile.
 
-## Test without changing your default browser
+## Check
 
+```sh
+APP="/Applications/URL to Profile Router.app/Contents/MacOS/Router"
+"$APP" --check
+"$APP" --list-profiles
+"$APP" --dry-run https://github.com/foo
 ```
-"/Applications/URL to Profile Router.app/Contents/MacOS/Router" --dry-run https://github.com/foo
-"/Applications/URL to Profile Router.app/Contents/MacOS/Router" --list-profiles
+
+Core routing tests run anywhere Swift is available:
+
+```sh
+swiftc Core.swift CoreTests.swift -o /tmp/router-tests && /tmp/router-tests
 ```
-
-## Files
-
-- `main.swift` — the whole app
-- `Info.plist` — browser registration (http/https/file schemes, public.html)
-- `icon.swift` — draws the app icon at build time (repo stays source-only)
-- `rules.json` — default config template
-- `build.sh` / `install.sh` — build, sign, install, register
