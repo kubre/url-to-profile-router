@@ -59,10 +59,25 @@ func matchProfile(host: String, cfg: Config) -> String? {
     return cfg.fallbackProfile
 }
 
+func launch(_ appURL: URL, _ args: [String]) {
+    let conf = NSWorkspace.OpenConfiguration()
+    conf.activates = true
+    conf.arguments = args
+    NSWorkspace.shared.openApplication(at: appURL, configuration: conf) { _, _ in }
+}
+
 func openURL(_ urlString: String, dryRun: Bool = false) {
-    guard let url = URL(string: urlString), let host = url.host else { return }
+    guard let url = URL(string: urlString) else { return }
     let cfg = loadConfig()
     let browserID = (cfg.browser?.isEmpty == false) ? cfg.browser! : defaultBrowserID
+    let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
+    let appURL = ((resolved != nil && fm.fileExists(atPath: resolved!.path)) ? resolved! : URL(fileURLWithPath: "/Applications/Helium.app"))
+    if url.isFileURL {
+        if dryRun { print("\(urlString) -> \(browserID) (local file, default profile)") }
+        else { launch(appURL, [urlString]) }
+        return
+    }
+    guard let host = url.host else { return }
     let profile = matchProfile(host: host, cfg: cfg)
     var dir: String? = nil
     if let p = profile { dir = profileDir(for: p) ?? p }
@@ -70,13 +85,8 @@ func openURL(_ urlString: String, dryRun: Bool = false) {
         print("\(urlString) -> \(browserID) profile=\(profile ?? "(default)") dir=\(dir ?? "(default)")")
         return
     }
-    let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
-    let appURL = ((resolved != nil && fm.fileExists(atPath: resolved!.path)) ? resolved! : URL(fileURLWithPath: "/Applications/Helium.app"))
-    let conf = NSWorkspace.OpenConfiguration()
-    conf.activates = true
-    if let d = dir { conf.arguments = ["--profile-directory=\(d)", urlString] }
-    else { conf.arguments = [urlString] }
-    NSWorkspace.shared.openApplication(at: appURL, configuration: conf) { _, _ in }
+    if let d = dir { launch(appURL, ["--profile-directory=\(d)", urlString]) }
+    else { launch(appURL, [urlString]) }
 }
 
 class Delegate: NSObject, NSApplicationDelegate {
@@ -111,7 +121,7 @@ if args.contains("--set-default") {
     print("set default browser to \(id) (if nothing changed, set it in System Settings → Desktop & Dock)")
     exit(0)
 }
-let urls = args.dropFirst().filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") }
+let urls = args.dropFirst().filter { $0.hasPrefix("http://") || $0.hasPrefix("https://") || $0.hasPrefix("file://") }
 if args.contains("--dry-run") || !urls.isEmpty {
     let dry = args.contains("--dry-run")
     if urls.isEmpty, dry {
