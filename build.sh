@@ -6,7 +6,7 @@ rm -rf build
 mkdir -p "build/$APP.app/Contents/MacOS" "build/$APP.app/Contents/Resources"
 swiftc -O -o "build/$APP.app/Contents/MacOS/Router" main.swift -framework AppKit
 cp Info.plist "build/$APP.app/Contents/Info.plist"
-cp rules.json "build/$APP.app/Contents/Resources/rules.json"
+cp rules.conf "build/$APP.app/Contents/Resources/rules.conf"
 # icon: drawn by icon.swift, converted to .icns (repo stays source-only)
 /usr/bin/swift icon.swift "build/icon_1024.png"
 ICONSET="build/AppIcon.iconset"
@@ -19,6 +19,6 @@ done
 iconutil -c icns "$ICONSET" -o "build/$APP.app/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET" "build/icon_1024.png"
 mkdir -p ~/.config
-[ -f ~/.config/url-router.json ] || cp rules.json ~/.config/url-router.json
+[ -f ~/.config/url-router.conf ] || cp rules.conf ~/.config/url-router.conf
 ls -lh "build/$APP.app/Contents/MacOS/Router"
 echo "built build/$APP.app — run ./install.sh"

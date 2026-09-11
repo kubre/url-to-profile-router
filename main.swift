@@ -1,21 +1,31 @@
 import AppKit
 import CoreServices
 
-struct Rule: Decodable { var host: String; var profile: String }
-struct Config: Decodable { var browser: String?; var rules: [Rule]; var fallbackProfile: String? }
+struct Rule { var host: String; var profile: String }
+struct Config { var browser: String; var rules: [Rule]; var fallbackProfile: String? }
 
 let fm = FileManager.default
 let home = NSHomeDirectory()
-let configPath = home + "/.config/url-router.json"
+let configPath = home + "/.config/url-router.conf"
 let heliumSupport = home + "/Library/Application Support/net.imput.helium"
 let defaultBrowserID = "net.imput.helium"
 
+// Keep in sync with rules.conf (used only if the bundled template is missing).
+let embeddedConfig = """
+# URL to Profile Router — one rule per line: <domain> <helium-profile>
+# First match wins. Subdomains match too: github.com covers gist.github.com.
+github.com tars
+youtube.com persoanl
+youtu.be persoanl
+music.youtube.com persoanl
+# @browser <bundle-id>  (default net.imput.helium)
+# @fallback <profile>   (default: Helium's last-used profile)
+"""
+
 func defaultConfig() -> String {
-    let url = Bundle.main.url(forResource: "rules", withExtension: "json")
-    if let u = url, let s = try? String(contentsOf: u, encoding: .utf8) { return s }
-    if let u = URL(string: "file://" + FileManager.default.currentDirectoryPath + "/rules.json"),
+    if let u = Bundle.main.url(forResource: "rules", withExtension: "conf"),
        let s = try? String(contentsOf: u, encoding: .utf8) { return s }
-    return #"{"browser":"\#(defaultBrowserID)","rules":[{"host":"github.com","profile":"tars"},{"host":"youtube.com","profile":"persoanl"},{"host":"youtu.be","profile":"persoanl"}],"fallbackProfile":null}"#
+    return embeddedConfig
 }
 
 func loadConfig() -> Config {
@@ -23,10 +33,23 @@ func loadConfig() -> Config {
         try? fm.createDirectory(atPath: (configPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
         try? defaultConfig().write(toFile: configPath, atomically: true, encoding: .utf8)
     }
-    if let data = fm.contents(atPath: configPath),
-       let cfg = try? JSONDecoder().decode(Config.self, from: data) { return cfg }
-    let data = defaultConfig().data(using: .utf8)!
-    return (try? JSONDecoder().decode(Config.self, from: data)) ?? Config(browser: defaultBrowserID, rules: [], fallbackProfile: nil)
+    let text = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? defaultConfig()
+    var browser = defaultBrowserID
+    var fallback: String? = nil
+    var rules: [Rule] = []
+    for raw in text.components(separatedBy: "\n") {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty || line.hasPrefix("#") { continue }
+        let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        if parts.count != 2 { continue }
+        let key = String(parts[0])
+        let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        if value.isEmpty { continue }
+        if key == "@browser" { browser = value }
+        else if key == "@fallback" { fallback = value }
+        else if !key.hasPrefix("@") { rules.append(Rule(host: key, profile: value)) }
+    }
+    return Config(browser: browser, rules: rules, fallbackProfile: fallback)
 }
 
 func heliumProfiles() -> [String: String] {
@@ -69,7 +92,7 @@ func launch(_ appURL: URL, _ args: [String]) {
 func openURL(_ urlString: String, dryRun: Bool = false) {
     guard let url = URL(string: urlString) else { return }
     let cfg = loadConfig()
-    let browserID = (cfg.browser?.isEmpty == false) ? cfg.browser! : defaultBrowserID
+    let browserID = cfg.browser.isEmpty ? defaultBrowserID : cfg.browser
     let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
     let appURL = ((resolved != nil && fm.fileExists(atPath: resolved!.path)) ? resolved! : URL(fileURLWithPath: "/Applications/Helium.app"))
     if url.isFileURL {

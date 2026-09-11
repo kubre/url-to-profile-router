@@ -6,7 +6,8 @@ Tiny Velja/Choosy clone. One Swift file, no dependencies. Routes URLs to Helium 
 - `youtube.com`, `youtu.be` → Helium profile `persoanl`
 - local files, everything else → Helium default (last used profile)
 
-Edit rules in `~/.config/url-router.json` (created on first run from `rules.json`).
+Edit rules in `~/.config/url-router.conf` (created on first run from `rules.conf`).
+Plain text, one rule per line — no JSON anywhere in this project.
 
 ## Install
 
@@ -19,14 +20,15 @@ Then System Settings → Desktop & Dock → Default web browser → **URL to Pro
 
 ## Add more rules
 
-`~/.config/url-router.json`:
+`~/.config/url-router.conf`:
 
-```json
-{
-  "browser": "net.imput.helium",
-  "rules": [{ "host": "figma.com", "profile": "tars" }],
-  "fallbackProfile": null
-}
+```
+# <domain> <helium-profile>, first match wins
+figma.com tars
+
+# optional directives:
+# @browser net.imput.helium
+# @fallback tars
 ```
 
 Match is suffix-based: `figma.com` also matches `www.figma.com`. First match wins.
