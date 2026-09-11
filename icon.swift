@@ -31,6 +31,7 @@ white.setStroke()
 path.stroke()
 for p in [left, out1, out2] {
     let r = f * 0.088
+    white.setFill()
     NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)).fill()
 }
 img.unlockFocus()
