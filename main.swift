@@ -70,8 +70,8 @@ func openURL(_ urlString: String, dryRun: Bool = false) {
         print("\(urlString) -> \(browserID) profile=\(profile ?? "(default)") dir=\(dir ?? "(default)")")
         return
     }
-    guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
-        ?? URL(fileURLWithPath: "/Applications/Helium.app") else { return }
+    let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browserID)
+    let appURL = ((resolved != nil && fm.fileExists(atPath: resolved!.path)) ? resolved! : URL(fileURLWithPath: "/Applications/Helium.app"))
     let conf = NSWorkspace.OpenConfiguration()
     conf.activates = true
     if let d = dir { conf.arguments = ["--profile-directory=\(d)", urlString] }
@@ -105,7 +105,7 @@ if args.contains("--list-profiles") {
     exit(0)
 }
 if args.contains("--set-default") {
-    let id = Bundle.main.bundleIdentifier ?? "com.vaibhav.urlrouter" as CFString
+    let id = Bundle.main.bundleIdentifier ?? "com.vaibhav.urlrouter"
     LSSetDefaultHandlerForURLScheme("http" as CFString, id as CFString)
     LSSetDefaultHandlerForURLScheme("https" as CFString, id as CFString)
     print("set default browser to \(id) (if nothing changed, set it in System Settings → Desktop & Dock)")
