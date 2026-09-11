@@ -1,24 +1,20 @@
 #!/bin/sh
-set -e
+set -eu
 cd "$(dirname "$0")"
 APP="URL to Profile Router"
+OUT="build/$APP.app"
 rm -rf build
-mkdir -p "build/$APP.app/Contents/MacOS" "build/$APP.app/Contents/Resources"
-swiftc -O -o "build/$APP.app/Contents/MacOS/Router" main.swift -framework AppKit
-cp Info.plist "build/$APP.app/Contents/Info.plist"
-cp rules.conf "build/$APP.app/Contents/Resources/rules.conf"
-# icon: drawn by icon.swift, converted to .icns (repo stays source-only)
-/usr/bin/swift icon.swift "build/icon_1024.png"
-ICONSET="build/AppIcon.iconset"
-mkdir -p "$ICONSET"
+mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
+swiftc -O -o "$OUT/Contents/MacOS/Router" Core.swift main.swift -framework AppKit
+cp Info.plist "$OUT/Contents/Info.plist"
+cp rules.conf "$OUT/Contents/Resources/rules.conf"
+/usr/bin/swift icon.swift build/icon.png
+mkdir -p build/AppIcon.iconset
 for s in 16 32 128 256 512; do
-  sips -z $s $s "build/icon_1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z "$s" "$s" build/icon.png --out "build/AppIcon.iconset/icon_${s}x${s}.png" >/dev/null
   d=$((s * 2))
-  sips -z $d $d "build/icon_1024.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  sips -z "$d" "$d" build/icon.png --out "build/AppIcon.iconset/icon_${s}x${s}@2x.png" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "build/$APP.app/Contents/Resources/AppIcon.icns"
-rm -rf "$ICONSET" "build/icon_1024.png"
-mkdir -p ~/.config
-[ -f ~/.config/url-router.conf ] || cp rules.conf ~/.config/url-router.conf
-ls -lh "build/$APP.app/Contents/MacOS/Router"
-echo "built build/$APP.app — run ./install.sh"
+iconutil -c icns build/AppIcon.iconset -o "$OUT/Contents/Resources/AppIcon.icns"
+rm -rf build/AppIcon.iconset build/icon.png
+ls -lh "$OUT/Contents/MacOS/Router"
