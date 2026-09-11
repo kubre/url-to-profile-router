@@ -1,43 +1,48 @@
 import AppKit
 
-// Draws the app icon: a routing split (one link in, two profiles out) on a gradient tile.
-// Usage: swift icon.swift <output-1024.png>
-let N = 1024
-let img = NSImage(size: NSSize(width: N, height: N))
-img.lockFocus()
-let rect = NSRect(x: 0, y: 0, width: N, height: N)
-
-let bg = NSBezierPath(roundedRect: rect, xRadius: CGFloat(N) * 0.225, yRadius: CGFloat(N) * 0.225)
-let top = NSColor(srgbRed: 0x6D / 255.0, green: 0x6A / 255.0, blue: 0xFE / 255.0, alpha: 1)
-let bottom = NSColor(srgbRed: 0x1D / 255.0, green: 0x4E / 255.0, blue: 0xD8 / 255.0, alpha: 1)
-if let grad = NSGradient(starting: top, ending: bottom) {
+// Render fixed pixels, independent of the build machine's Retina scale.
+// macOS's iconset format defines the 16…1024-pixel representations in build.sh.
+let n = 1024
+func renderIcon(to output: URL) throws {
+    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: n, pixelsHigh: n,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+        let context = NSGraphicsContext(bitmapImageRep: bitmap) else {
+        throw NSError(domain: "IconRenderer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot allocate icon bitmap."])
+    }
     NSGraphicsContext.saveGraphicsState()
-    bg.setClip()
-    grad.draw(in: rect, angle: 90)
+    defer { NSGraphicsContext.restoreGraphicsState() }
+    NSGraphicsContext.current = context
+    let f = CGFloat(n)
+    let rect = NSRect(x: 0, y: 0, width: f, height: f)
+    NSColor.clear.setFill(); rect.fill()
+    let tile = NSBezierPath(roundedRect: rect, xRadius: f * 0.225, yRadius: f * 0.225)
+    let top = NSColor(srgbRed: 0x6D / 255.0, green: 0x6A / 255.0, blue: 0xFE / 255.0, alpha: 1)
+    let bottom = NSColor(srgbRed: 0x1D / 255.0, green: 0x4E / 255.0, blue: 0xD8 / 255.0, alpha: 1)
+    NSGraphicsContext.saveGraphicsState()
+    tile.setClip()
+    NSGradient(starting: top, ending: bottom)?.draw(in: rect, angle: 90)
     NSGraphicsContext.restoreGraphicsState()
+    let origin = NSPoint(x: f * 0.29, y: f * 0.5)
+    let endpoints = [NSPoint(x: f * 0.71, y: f * 0.71), NSPoint(x: f * 0.71, y: f * 0.29)]
+    NSColor.white.setStroke(); NSColor.white.setFill()
+    let path = NSBezierPath()
+    for endpoint in endpoints { path.move(to: origin); path.line(to: endpoint) }
+    path.lineWidth = f * 0.062; path.lineCapStyle = .round; path.stroke()
+    for point in [origin] + endpoints {
+        let radius = f * 0.088
+        NSBezierPath(ovalIn: NSRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)).fill()
+    }
+    guard let png = bitmap.representation(using: .png, properties: [:]) else {
+        throw NSError(domain: "IconRenderer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot encode PNG."])
+    }
+    try png.write(to: output, options: .atomic)
 }
 
-let white = NSColor.white
-let f = CGFloat(N)
-let left = NSPoint(x: f * 0.29, y: f * 0.5)
-let out1 = NSPoint(x: f * 0.71, y: f * 0.71)
-let out2 = NSPoint(x: f * 0.71, y: f * 0.29)
-let path = NSBezierPath()
-path.move(to: left); path.line(to: out1)
-path.move(to: left); path.line(to: out2)
-path.lineWidth = f * 0.062
-path.lineCapStyle = .round
-white.setStroke()
-path.stroke()
-for p in [left, out1, out2] {
-    let r = f * 0.088
-    white.setFill()
-    NSBezierPath(ovalIn: NSRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)).fill()
+do {
+    let output = CommandLine.arguments.dropFirst().first ?? "icon_1024.png"
+    try renderIcon(to: URL(fileURLWithPath: output))
+} catch {
+    FileHandle.standardError.write(Data("Icon generation failed: \(error.localizedDescription)\n".utf8))
+    exit(1)
 }
-img.unlockFocus()
-
-guard let tiff = img.tiffRepresentation,
-      let rep = NSBitmapImageRep(data: tiff),
-      let png = rep.representation(using: .png, properties: [:]) else { exit(1) }
-let out = CommandLine.arguments.dropFirst().first ?? "icon_1024.png"
-try! png.write(to: URL(fileURLWithPath: out))

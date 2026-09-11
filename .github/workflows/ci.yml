@@ -1,0 +1,57 @@
+name: Native validation
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test-and-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Core regression tests
+        run: ./test.sh | tee core-tests.txt
+      - name: Build native app and smoke-test CLI
+        run: |
+          ./build.sh
+          "build/URL to Profile Router.app/Contents/MacOS/Router" --help
+          if "build/URL to Profile Router.app/Contents/MacOS/Router" --unknown-option; then
+            echo 'Unknown CLI option unexpectedly succeeded' >&2
+            exit 1
+          fi
+          cat build/size-report.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Compare original executable on the same SDK and architecture
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then exit 0; fi
+          DIR=$(mktemp -d)
+          trap 'rm -rf "$DIR"' EXIT
+          git show "$BASE_SHA:main.swift" > "$DIR/main.swift"
+          MIN_OS=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist)
+          xcrun swiftc -O -target "$(uname -m)-apple-macosx$MIN_OS" -o "$DIR/Original" "$DIR/main.swift" -framework AppKit
+          {
+            echo 'Baseline: original main.swift, -O, same compiler/SDK/target; no symbol stripping (original build behavior).'
+            printf 'Baseline executable bytes: '; stat -f %z "$DIR/Original"
+            cat build/size-report.txt
+          } | tee build/comparison.txt
+          cat build/comparison.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep validation receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validation-${{ runner.arch }}
+          path: |
+            core-tests.txt
+            build/size-report.txt
+            build/comparison.txt
