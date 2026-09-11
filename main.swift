@@ -52,15 +52,51 @@ func loadConfig() -> Config {
     return Config(browser: browser, rules: rules, fallbackProfile: fallback)
 }
 
+// Helium's Local State maps profile dirs ("Profile 3") to display names ("tars").
+// Read it with a tiny brace-tracking scan instead of a JSON parser.
 func heliumProfiles() -> [String: String] {
     let state = heliumSupport + "/Local State"
     guard let data = fm.contents(atPath: state),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let profile = json["profile"] as? [String: Any],
-          let cache = profile["info_cache"] as? [String: Any] else { return [:] }
+          let t = String(data: data, encoding: .utf8),
+          let key = t.range(of: "\"info_cache\""),
+          let open = t[key.upperBound...].firstIndex(of: "{") else { return [:] }
     var out: [String: String] = [:]
-    for (dir, info) in cache {
-        if let name = (info as? [String: Any])?["name"] as? String { out[name] = dir }
+    var depth = 0
+    var dir: String? = nil
+    var i = open
+    let end = t.endIndex
+    func readString(_ i: inout String.Index) -> String {
+        var s = ""
+        i = t.index(after: i)
+        while i < end, t[i] != "\"" {
+            if t[i] == "\\" { i = t.index(after: i); if i < end { s.append(t[i]); i = t.index(after: i) } }
+            else { s.append(t[i]); i = t.index(after: i) }
+        }
+        if i < end { i = t.index(after: i) }
+        return s
+    }
+    func skipSpace(_ i: inout String.Index) {
+        while i < end, " \t\n\r".contains(t[i]) { i = t.index(after: i) }
+    }
+    while i < end {
+        let c = t[i]
+        if c == "{" { depth += 1; i = t.index(after: i) }
+        else if c == "}" {
+            depth -= 1
+            if depth <= 0 { break }
+            if depth == 1 { dir = nil }
+            i = t.index(after: i)
+        } else if c == "\"" {
+            let s = readString(&i)
+            var k = i; skipSpace(&k)
+            if k < end, t[k] == ":" {
+                if depth == 1 { dir = s }
+                else if depth == 2, s == "name", let d = dir {
+                    var m = t.index(after: k); skipSpace(&m)
+                    if m < end, t[m] == "\"" { out[readString(&m)] = d; i = m }
+                }
+            }
+        } else { i = t.index(after: i) }
     }
     return out
 }
