@@ -69,12 +69,21 @@ func err(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf
 
 final class Delegate: NSObject, NSApplicationDelegate {
     struct Job { let app: URL; let urls: [URL]; let args: [String] }
+    let initial: [String]
     var queue: [Job] = []
     var busy = false
     var failed: [(String, String)] = []
-    var finished = false
 
-    func applicationDidFinishLaunching(_ n: Notification) { finished = true; finish() }
+    init(initial: [String] = []) { self.initial = initial }
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        if !initial.isEmpty { route(initial) }
+    }
+
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        if initial.isEmpty { NSApp.terminate(nil) }
+        return true
+    }
 
     func application(_ app: NSApplication, open urls: [URL]) {
         route(urls.map(\.absoluteString))
@@ -101,6 +110,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
         } catch {
             failed += inputs.map { ($0, error.localizedDescription) }
             showFailure()
+            finish()
         }
     }
 
@@ -139,7 +149,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
     }
 
     func finish() {
-        guard finished, !busy, queue.isEmpty else { return }
+        guard !busy, queue.isEmpty else { return }
         DispatchQueue.main.async { if !self.busy && self.queue.isEmpty { NSApp.terminate(nil) } }
     }
 }
@@ -182,9 +192,8 @@ do {
     }
     if !inputs.isEmpty {
         let app = NSApplication.shared
-        let delegate = Delegate()
+        let delegate = Delegate(initial: inputs)
         app.delegate = delegate
-        DispatchQueue.main.async { delegate.route(inputs) }
         app.run()
         exit(0)
     }
