@@ -1,18 +1,35 @@
 import AppKit
 import CoreServices
+import UniformTypeIdentifiers
+import Foundation
 
 let fm = FileManager.default
 let home = NSHomeDirectory()
 let configURL = URL(fileURLWithPath: home + "/.config/url-router.conf")
 let templateURL = Bundle.main.url(forResource: "rules", withExtension: "conf")
+let bundleURL = Bundle.main.bundleURL
+
+func describeOSStatus(_ status: OSStatus) -> String {
+    switch status {
+    case noErr: return "success"
+    case -10827: return "kLSNoExecutableErr"
+    default: return "OSStatus \(status)"
+    }
+}
+
+func createConfigIfMissing() throws {
+    if fm.fileExists(atPath: configURL.path) { return }
+    guard let templateURL else { throw RouterError("bundled rules.conf is missing; reinstall the app") }
+    try fm.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    do { try fm.copyItem(at: templateURL, to: configURL) }
+    catch let e as NSError where e.domain == NSCocoaErrorDomain && e.code == NSFileWriteFileExistsError { }
+}
 
 func loadConfig(create: Bool = false) throws -> Config {
+    if create { try createConfigIfMissing() }
     if !fm.fileExists(atPath: configURL.path) {
         guard let templateURL else { throw RouterError("bundled rules.conf is missing; reinstall the app") }
-        if !create { return try Config(String(contentsOf: templateURL, encoding: .utf8), source: templateURL.path) }
-        try fm.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        do { try fm.copyItem(at: templateURL, to: configURL) }
-        catch let e as NSError where e.domain == NSCocoaErrorDomain && e.code == NSFileWriteFileExistsError { }
+        return try Config(String(contentsOf: templateURL, encoding: .utf8), source: templateURL.path)
     }
     do { return try Config(String(contentsOf: configURL, encoding: .utf8), source: configURL.path) }
     catch { throw RouterError("cannot load \(configURL.path): \(error.localizedDescription)") }
@@ -28,13 +45,14 @@ func browserURL(_ cfg: Config) throws -> URL {
 }
 
 func profiles(_ cfg: Config) throws -> [BrowserProfile] {
+    guard cfg.supportsProfileSwitching else { return [] }
     let state = try cfg.profileRoot(home: home).appendingPathComponent("Local State")
     do { return try parseProfiles(Data(contentsOf: state)) }
     catch { throw RouterError("\(state.path): \(error.localizedDescription)") }
 }
 
 func checkedRoute(_ text: String, cfg: Config, profiles: () throws -> [BrowserProfile]) throws -> Route {
-    let route = try planRoute(text, config: cfg, profiles: profiles)
+    let route = try planRoute(text, config: cfg, profiles: profiles, requireProfiles: cfg.supportsProfileSwitching)
     if let dir = route.directory {
         let root = try cfg.profileRoot(home: home).standardizedFileURL
         let target = root.appendingPathComponent(dir).standardizedFileURL
@@ -49,15 +67,21 @@ func checkedRoute(_ text: String, cfg: Config, profiles: () throws -> [BrowserPr
 
 func report(_ cfg: Config) throws -> String {
     _ = try browserURL(cfg)
-    let ps = try profiles(cfg)
     var lines = ["OK — \(cfg.rules.count) rules", "Browser: \(cfg.browser)"]
-    for rule in cfg.rules { _ = try resolveProfile(rule.profile, profiles: ps) }
-    if let fallback = cfg.fallback { _ = try resolveProfile(fallback, profiles: ps) }
+    if cfg.supportsProfileSwitching {
+        let ps = try profiles(cfg)
+        for rule in cfg.rules { _ = try resolveProfile(rule.profile, profiles: ps) }
+        if let fallback = cfg.fallback { _ = try resolveProfile(fallback, profiles: ps) }
+    }
     lines += cfg.warnings.map { "Warning: \($0)" }
     return lines.joined(separator: "\n")
 }
 
 func setDefault() throws {
+    if bundleURL.path.contains(".app/Contents/MacOS/") {
+        let registerStatus = LSRegisterURL(bundleURL as CFURL, true)
+        guard registerStatus == noErr else { throw RouterError("could not register app bundle (\(describeOSStatus(registerStatus)))") }
+    }
     let id = Bundle.main.bundleIdentifier ?? Config.routerID
     for scheme in ["http", "https"] {
         let status = LSSetDefaultHandlerForURLScheme(scheme as CFString, id as CFString)
@@ -73,16 +97,60 @@ final class Delegate: NSObject, NSApplicationDelegate {
     var queue: [Job] = []
     var busy = false
     var failed: [(String, String)] = []
+    var statusItem: NSStatusItem?
+    var resident: Bool { initial.isEmpty }
 
     init(initial: [String] = []) { self.initial = initial }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        if !initial.isEmpty { route(initial) }
+        if resident { showStatusItem() } else { route(initial) }
     }
 
-    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        if initial.isEmpty { NSApp.terminate(nil) }
-        return true
+    func showStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "URL to Profile Router")
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Set as Default Browser", action: #selector(setAsDefault), keyEquivalent: "d").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Edit Rules…", action: #selector(editRules), keyEquivalent: ",").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Quit URL to Profile Router", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc func setAsDefault() {
+        do {
+            try setDefault()
+            let alert = NSAlert()
+            alert.messageText = "Default browser updated"
+            alert.informativeText = "URL to Profile Router is now the default handler for http and https."
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Could not set default"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "Close")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+    }
+
+    @objc func editRules() {
+        do {
+            try createConfigIfMissing()
+            let editor = NSWorkspace.shared.urlForApplication(toOpen: .plainText)
+                ?? URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+            NSWorkspace.shared.open([configURL], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Cannot open rules"
+            alert.informativeText = error.localizedDescription
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
     }
 
     func application(_ app: NSApplication, open urls: [URL]) {
@@ -149,7 +217,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
     }
 
     func finish() {
-        guard !busy, queue.isEmpty else { return }
+        guard !resident, !busy, queue.isEmpty else { return }
         DispatchQueue.main.async { if !self.busy && self.queue.isEmpty { NSApp.terminate(nil) } }
     }
 }

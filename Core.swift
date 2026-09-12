@@ -91,6 +91,10 @@ struct Config {
         if let known = Self.browserRoots.keys.first(where: { $0.lowercased() == browser.lowercased() }) { browser = known }
     }
 
+    var supportsProfileSwitching: Bool {
+        Self.browserRoots.keys.contains { $0.lowercased() == browser.lowercased() }
+    }
+
     func profileRoot(home: String) throws -> URL {
         guard let relative = Self.browserRoots[browser] else {
             throw RouterError("Profile routing is not configured for browser '\(browser)'. Use a supported Chromium browser bundle ID.")
@@ -187,9 +191,20 @@ struct Route: Equatable {
     let reason: String
 }
 
-func planRoute(_ text: String, config: Config, profiles: () throws -> [BrowserProfile]) throws -> Route {
+func planRoute(
+    _ text: String,
+    config: Config,
+    profiles: () throws -> [BrowserProfile],
+    requireProfiles: Bool = true
+) throws -> Route {
     let url = try validatedURL(text)
     let selected = try config.profile(for: url)
-    let directory = try selected.name.map { try resolveProfile($0, profiles: profiles()) }
-    return Route(url: url, profile: selected.name, directory: directory, reason: selected.reason)
+    guard let selectedName = selected.name else {
+        return Route(url: url, profile: nil, directory: nil, reason: selected.reason)
+    }
+    guard requireProfiles else {
+        return Route(url: url, profile: selectedName, directory: nil, reason: selected.reason)
+    }
+    let directory = try resolveProfile(selectedName, profiles: profiles())
+    return Route(url: url, profile: selectedName, directory: directory, reason: selected.reason)
 }
