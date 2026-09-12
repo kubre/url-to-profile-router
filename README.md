@@ -4,6 +4,10 @@ A small macOS menu bar app that opens web links in the browser profile selected 
 
 ## Install
 
+Download the ZIP or DMG from [GitHub Releases](https://github.com/kubre/url-to-profile-router/releases/latest), copy the app to `/Applications`, and open it. Existing rules are preserved. If macOS blocks the app, allow it in **System Settings > Privacy & Security**.
+
+Or build from source:
+
 ```sh
 ./install.sh
 ```
