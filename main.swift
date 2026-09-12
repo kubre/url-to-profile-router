@@ -9,14 +9,6 @@ let configURL = URL(fileURLWithPath: home + "/.config/url-router.conf")
 let templateURL = Bundle.main.url(forResource: "rules", withExtension: "conf")
 let bundleURL = Bundle.main.bundleURL
 
-func describeOSStatus(_ status: OSStatus) -> String {
-    switch status {
-    case noErr: return "success"
-    case -10827: return "kLSNoExecutableErr"
-    default: return "OSStatus \(status)"
-    }
-}
-
 func createConfigIfMissing() throws {
     if fm.fileExists(atPath: configURL.path) { return }
     guard let templateURL else { throw RouterError("bundled rules.conf is missing; reinstall the app") }
@@ -35,26 +27,25 @@ func loadConfig(create: Bool = false) throws -> Config {
     catch { throw RouterError("cannot load \(configURL.path): \(error.localizedDescription)") }
 }
 
-func browserURL(_ cfg: Config) throws -> URL {
-    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: cfg.browser),
+func browserURL(_ browser: String) throws -> URL {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: browser),
           let bundle = Bundle(url: url), bundle.bundleIdentifier?.lowercased() != Config.routerID,
           let executable = bundle.executableURL, fm.isExecutableFile(atPath: executable.path) else {
-        throw RouterError("browser '\(cfg.browser)' is not installed or executable")
+        throw RouterError("browser '\(browser)' is not installed or executable")
     }
     return url
 }
 
-func profiles(_ cfg: Config) throws -> [BrowserProfile] {
-    guard cfg.supportsProfileSwitching else { return [] }
-    let state = try cfg.profileRoot(home: home).appendingPathComponent("Local State")
+func profiles(_ browser: String) throws -> [BrowserProfile] {
+    let state = try Config.profileRoot(browser: browser, home: home).appendingPathComponent("Local State")
     do { return try parseProfiles(Data(contentsOf: state)) }
     catch { throw RouterError("\(state.path): \(error.localizedDescription)") }
 }
 
-func checkedRoute(_ text: String, cfg: Config, profiles: () throws -> [BrowserProfile]) throws -> Route {
-    let route = try planRoute(text, config: cfg, profiles: profiles, requireProfiles: cfg.supportsProfileSwitching)
+func checkedRoute(_ text: String, cfg: Config, profiles: (String) throws -> [BrowserProfile]) throws -> Route {
+    let route = try planRoute(text, config: cfg, profiles: profiles)
     if let dir = route.directory {
-        let root = try cfg.profileRoot(home: home).standardizedFileURL
+        let root = try Config.profileRoot(browser: route.browser, home: home).standardizedFileURL
         let target = root.appendingPathComponent(dir).standardizedFileURL
         var isDir: ObjCBool = false
         guard target.deletingLastPathComponent() == root,
@@ -65,27 +56,46 @@ func checkedRoute(_ text: String, cfg: Config, profiles: () throws -> [BrowserPr
     return route
 }
 
+func defaultHandler(_ scheme: String) -> String? {
+    guard let url = URL(string: "\(scheme)://example.com"),
+          let application = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
+    return Bundle(url: application)?.bundleIdentifier
+}
+
 func report(_ cfg: Config) throws -> String {
-    _ = try browserURL(cfg)
-    var lines = ["OK — \(cfg.rules.count) rules", "Browser: \(cfg.browser)"]
-    if cfg.supportsProfileSwitching {
-        let ps = try profiles(cfg)
-        for rule in cfg.rules { _ = try resolveProfile(rule.profile, profiles: ps) }
-        if let fallback = cfg.fallback { _ = try resolveProfile(fallback, profiles: ps) }
+    var lines = ["OK: \(cfg.rules.count) rules", "Default browser: \(cfg.browser)"]
+    var cache: [String: [BrowserProfile]] = [:]
+    for value in [nil, cfg.fallback] + cfg.rules.map({ Optional($0.profile) }) {
+        let destination = try cfg.destination(value)
+        _ = try browserURL(destination.browser)
+        if let name = destination.profile {
+            if cache[destination.browser] == nil { cache[destination.browser] = try profiles(destination.browser) }
+            _ = try resolveProfile(name, profiles: cache[destination.browser] ?? [])
+        }
+    }
+    for scheme in ["http", "https"] {
+        let handler = defaultHandler(scheme)
+        lines.append("\(scheme) handler: \(handler ?? "none")")
     }
     lines += cfg.warnings.map { "Warning: \($0)" }
     return lines.joined(separator: "\n")
 }
 
 func setDefault() throws {
-    if bundleURL.path.contains(".app/Contents/MacOS/") {
-        let registerStatus = LSRegisterURL(bundleURL as CFURL, true)
-        guard registerStatus == noErr else { throw RouterError("could not register app bundle (\(describeOSStatus(registerStatus)))") }
+    guard bundleURL.pathExtension == "app", Bundle.main.bundleIdentifier == Config.routerID else {
+        throw RouterError("run --set-default from the installed application bundle")
     }
-    let id = Bundle.main.bundleIdentifier ?? Config.routerID
+    let registerStatus = LSRegisterURL(bundleURL as CFURL, true)
+    guard registerStatus == noErr else { throw RouterError("could not register app bundle (OSStatus \(registerStatus))") }
+
+    let id = Config.routerID
     for scheme in ["http", "https"] {
+        if defaultHandler(scheme) == id { continue }
         let status = LSSetDefaultHandlerForURLScheme(scheme as CFString, id as CFString)
         if status != noErr { throw RouterError("could not set \(scheme) handler (OSStatus \(status))") }
+        guard defaultHandler(scheme) == id else {
+            throw RouterError("macOS did not change the \(scheme) handler; select URL to Profile Router in System Settings > Desktop & Dock > Default web browser")
+        }
     }
 }
 
@@ -160,25 +170,25 @@ final class Delegate: NSObject, NSApplicationDelegate {
     func route(_ inputs: [String]) {
         do {
             let cfg = try loadConfig(create: true)
-            let app = try browserURL(cfg)
-            var cached: [BrowserProfile]?
-            func ps() throws -> [BrowserProfile] {
-                if let cached { return cached }
-                let value = try profiles(cfg); cached = value; return value
+            var cache: [String: [BrowserProfile]] = [:]
+            func availableProfiles(_ browser: String) throws -> [BrowserProfile] {
+                if let stored = cache[browser] { return stored }
+                let value = try profiles(browser)
+                cache[browser] = value
+                return value
             }
             for input in inputs {
                 do {
-                    let route = try checkedRoute(input, cfg: cfg, profiles: ps)
+                    let route = try checkedRoute(input, cfg: cfg, profiles: availableProfiles)
                     var args = route.directory.map { ["--profile-directory=\($0)"] } ?? []
                     args += ["--", route.url.absoluteString]
-                    queue.append(Job(app: app, urls: [route.url], args: args))
+                    queue.append(Job(app: try browserURL(route.browser), urls: [route.url], args: args))
                 } catch { failed.append((input, error.localizedDescription)) }
             }
             launchNext()
         } catch {
             failed += inputs.map { ($0, error.localizedDescription) }
-            showFailure()
-            finish()
+            launchNext()
         }
     }
 
@@ -191,18 +201,23 @@ final class Delegate: NSObject, NSApplicationDelegate {
         cfg.activates = true
         cfg.createsNewApplicationInstance = true
         cfg.arguments = job.args
-        NSWorkspace.shared.openApplication(at: job.app, configuration: cfg) { _, error in
+        let completion: (NSRunningApplication?, Error?) -> Void = { _, error in
             DispatchQueue.main.async {
                 if let error { self.failed += job.urls.map { ($0.absoluteString, error.localizedDescription) } }
                 self.busy = false
                 self.launchNext()
             }
         }
+        NSWorkspace.shared.openApplication(at: job.app, configuration: cfg, completionHandler: completion)
     }
 
     func showFailure() {
         guard !failed.isEmpty else { return }
         let message = failed.map { "\($0.0)\n\($0.1)" }.joined(separator: "\n\n")
+        if !resident {
+            err(message)
+            exit(1)
+        }
         let alert = NSAlert()
         alert.messageText = "Some links were not opened"
         alert.informativeText = message
@@ -224,6 +239,14 @@ final class Delegate: NSObject, NSApplicationDelegate {
 
 let args = Array(CommandLine.arguments.dropFirst())
 do {
+    let options: Set<String> = ["--help", "-h", "--check", "--list-profiles", "--set-default", "--dry-run"]
+    if let unknown = args.first(where: { $0.hasPrefix("-") && !options.contains($0) }) {
+        throw RouterError("unknown option '\(unknown)'; run --help")
+    }
+    let commands = args.filter { options.contains($0) }
+    guard commands.count <= 1, commands.isEmpty || commands == ["--dry-run"] || args.count == 1 else {
+        throw RouterError("use one command at a time; only --dry-run accepts URLs")
+    }
     if args.contains("--help") || args.contains("-h") {
         print("Router [--dry-run] <URL...>\nRouter --check | --list-profiles | --set-default")
         exit(0)
@@ -234,7 +257,10 @@ do {
     }
     if args.contains("--list-profiles") {
         let cfg = try loadConfig()
-        for p in try profiles(cfg) { print("\(p.name) -> \(p.directory)") }
+        let browsers = Set(try ([nil, cfg.fallback] + cfg.rules.map { Optional($0.profile) }).map { try cfg.destination($0).browser })
+        for browser in browsers.sorted() {
+            for profile in try profiles(browser) { print("\(browser)::\(profile.name) -> \(profile.directory)") }
+        }
         exit(0)
     }
     if args.contains("--set-default") {
@@ -246,15 +272,17 @@ do {
     let inputs = args.filter { !$0.hasPrefix("-") }
     if dry {
         let cfg = try loadConfig()
-        _ = try browserURL(cfg)
         let samples = inputs.isEmpty ? ["https://github.com/foo", "https://youtube.com", "https://example.com"] : inputs
-        var ps: [BrowserProfile]?
+        var cache: [String: [BrowserProfile]] = [:]
         for input in samples {
-            let route = try checkedRoute(input, cfg: cfg) {
-                if let ps { return ps }
-                let value = try profiles(cfg); ps = value; return value
+            let route = try checkedRoute(input, cfg: cfg) { browser in
+                if let stored = cache[browser] { return stored }
+                let value = try profiles(browser)
+                cache[browser] = value
+                return value
             }
-            print("\(input) -> \(route.profile ?? "default") [\(route.directory ?? "last used")] (\(route.reason))")
+            _ = try browserURL(route.browser)
+            print("\(input) -> \(route.browser)::\(route.profile ?? "default") [\(route.directory ?? "last used")] (\(route.reason))")
         }
         exit(0)
     }

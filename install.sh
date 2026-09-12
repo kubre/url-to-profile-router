@@ -3,16 +3,31 @@ set -eu
 cd "$(dirname "$0")"
 APP="URL to Profile Router"
 DEST="/Applications/$APP.app"
-NEW="/Applications/.$APP.new.app"
-OLD="/Applications/.$APP.old.app"
+
 CONF_DST="$HOME/.config/url-router.conf"
-CONF_SRC="$(cd "$(dirname "$0")" && pwd)/rules.conf"
+CONF_SRC="rules.conf"
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-./build.sh
-rm -rf "$NEW" "$OLD"
-cp -R "build/$APP.app" "$NEW"
-codesign --force --sign - "$NEW"
+OUT="build/$APP.app"
+rm -rf build
+mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
+swiftc -target "$(uname -m)-apple-macosx13.0" -O -o "$OUT/Contents/MacOS/Router" Core.swift main.swift -framework AppKit
+cp Info.plist "$OUT/Contents/Info.plist"
+cp rules.conf "$OUT/Contents/Resources/rules.conf"
+cp AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
+codesign --force --sign - "$OUT"
+codesign --verify --strict "$OUT"
+SOURCE="$OUT"
+STAGING=$(mktemp -d "/Applications/.url-router.XXXXXX")
+NEW="$STAGING/$APP.app"
+OLD="$STAGING/previous.app"
+cleanup() {
+  if [ -e "$OLD" ] && [ ! -e "$DEST" ]; then mv "$OLD" "$DEST"; fi
+  rm -rf "$STAGING"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+cp -R "$SOURCE" "$NEW"
 codesign --verify --strict "$NEW"
 
 if [ -e "$DEST" ]; then
@@ -32,17 +47,5 @@ if [ ! -e "$CONF_DST" ] && [ -e "$CONF_SRC" ]; then
   echo "added default config to $CONF_DST"
 fi
 "$LSREG" -f "$DEST"
-if ! open "$DEST"; then
-  if open -b com.vaibhav.urlrouter; then
-    echo "installed $DEST"
-    exit 0
-  fi
-  echo "installed $DEST"
-  echo "Could not auto-open the app (LaunchServices returned -600)."
-  echo "Please run:"
-  echo "  open -b com.vaibhav.urlrouter"
-  echo "or"
-  echo "  \"$DEST/Contents/MacOS/Router\" --set-default"
-  exit 0
-fi
+open "$DEST" || echo "Installed, but could not open $DEST" >&2
 echo "installed $DEST"

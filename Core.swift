@@ -11,6 +11,11 @@ struct RouterError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+struct Destination: Equatable {
+    let browser: String
+    let profile: String?
+}
+
 struct Rule: Equatable {
     let host: String
     let profile: String
@@ -89,13 +94,23 @@ struct Config {
         }
         if !errors.isEmpty { throw RouterError(errors.joined(separator: "\n")) }
         if let known = Self.browserRoots.keys.first(where: { $0.lowercased() == browser.lowercased() }) { browser = known }
+        _ = try destination(nil)
+        for rule in rules { _ = try destination(rule.profile) }
+        if let fallback { _ = try destination(fallback) }
     }
 
-    var supportsProfileSwitching: Bool {
-        Self.browserRoots.keys.contains { $0.lowercased() == browser.lowercased() }
+    func destination(_ value: String?) throws -> Destination {
+        let parts = value?.components(separatedBy: "::") ?? []
+        guard parts.count <= 2 else { throw RouterError("invalid destination '\(value ?? "")'; use browser-bundle-id::profile") }
+        let requested = parts.count == 2 ? parts[0] : browser
+        guard let browser = Self.browserRoots.keys.first(where: { $0.lowercased() == requested.lowercased() }) else {
+            throw RouterError("Browser '\(requested)' is not supported; use Helium, Chrome, Chromium, Brave, Edge, or Vivaldi.")
+        }
+        let profile = parts.count == 2 ? parts[1] : value
+        return Destination(browser: browser, profile: profile == "" ? nil : profile)
     }
 
-    func profileRoot(home: String) throws -> URL {
+    static func profileRoot(browser: String, home: String) throws -> URL {
         guard let relative = Self.browserRoots[browser] else {
             throw RouterError("Profile routing is not configured for browser '\(browser)'. Use a supported Chromium browser bundle ID.")
         }
@@ -117,6 +132,18 @@ struct Config {
 
 func canonicalHost(_ input: String) throws -> String {
     var host = input.lowercased()
+    if host.contains(":") || host.hasPrefix("[") {
+        let literal = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
+        var address = in6_addr()
+        guard literal.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+            throw RouterError("invalid IPv6 address '\(input)'")
+        }
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count)) != nil else {
+            throw RouterError("cannot normalize IPv6 address '\(input)'")
+        }
+        return "[" + String(cString: buffer) + "]"
+    }
     if host.hasPrefix(".") { host.removeFirst() }
     if host.hasSuffix(".") { host.removeLast() }
     guard !host.isEmpty,
@@ -127,6 +154,11 @@ func canonicalHost(_ input: String) throws -> String {
           let normalized = url.host?.lowercased(), !normalized.isEmpty else {
         throw RouterError("invalid domain '\(input)'; use a host only")
     }
+    let labels = normalized.split(separator: ".", omittingEmptySubsequences: false)
+    guard normalized.utf8.count <= 253, labels.allSatisfy({ label in
+        !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-"
+            && label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }
+    }) else { throw RouterError("invalid domain '\(input)'; use a host only") }
     return normalized
 }
 
@@ -186,6 +218,7 @@ func resolveProfile(_ requested: String, profiles: [BrowserProfile]) throws -> S
 
 struct Route: Equatable {
     let url: URL
+    let browser: String
     let profile: String?
     let directory: String?
     let reason: String
@@ -194,17 +227,11 @@ struct Route: Equatable {
 func planRoute(
     _ text: String,
     config: Config,
-    profiles: () throws -> [BrowserProfile],
-    requireProfiles: Bool = true
+    profiles: (String) throws -> [BrowserProfile]
 ) throws -> Route {
     let url = try validatedURL(text)
     let selected = try config.profile(for: url)
-    guard let selectedName = selected.name else {
-        return Route(url: url, profile: nil, directory: nil, reason: selected.reason)
-    }
-    guard requireProfiles else {
-        return Route(url: url, profile: selectedName, directory: nil, reason: selected.reason)
-    }
-    let directory = try resolveProfile(selectedName, profiles: profiles())
-    return Route(url: url, profile: selectedName, directory: directory, reason: selected.reason)
+    let destination = try config.destination(selected.name)
+    let directory = try destination.profile.map { try resolveProfile($0, profiles: profiles(destination.browser)) }
+    return Route(url: url, browser: destination.browser, profile: destination.profile, directory: directory, reason: selected.reason)
 }

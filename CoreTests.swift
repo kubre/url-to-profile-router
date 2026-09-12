@@ -9,7 +9,7 @@ func rejects(_ body: () throws -> Void) throws { do { try body() } catch { retur
     static func main() throws {
         let ps = [BrowserProfile(directory: "Default", name: "personal"), BrowserProfile(directory: "Profile 2", name: "tars")]
         let cfg = try Config("github.com tars\nyoutube.com personal")
-        func route(_ url: String, _ config: Config? = nil) throws -> Route { try planRoute(url, config: config ?? cfg) { ps } }
+        func route(_ url: String, _ config: Config? = nil) throws -> Route { try planRoute(url, config: config ?? cfg) { _ in ps } }
 
         try equal(route("https://github.com/a").directory, "Profile 2")
         try equal(route("https://gist.github.com/a").directory, "Profile 2")
@@ -30,9 +30,34 @@ func rejects(_ body: () throws -> Void) throws { do { try body() } catch { retur
         let json = #"{"profile":{"info_cache":{"Default":{"name":"caf\u00e9"},"Profile 2":{"name":"Work"}}}}"#
         try equal(try parseProfiles(Data(json.utf8))[0].name, "café")
         try rejects { _ = try parseProfiles(Data("{}".utf8)) }
-        try equal(try Config("").profileRoot(home: "/tmp").path, "/tmp/Library/Application Support/net.imput.helium")
-        try equal(try Config("@browser com.google.Chrome").profileRoot(home: "/tmp").path, "/tmp/Library/Application Support/Google/Chrome")
-        try rejects { _ = try Config("@browser org.mozilla.firefox").profileRoot(home: "/tmp") }
+        try equal(try Config.profileRoot(browser: Config.defaultBrowserID, home: "/tmp").path, "/tmp/Library/Application Support/net.imput.helium")
+        try equal(try Config.profileRoot(browser: "com.google.Chrome", home: "/tmp").path, "/tmp/Library/Application Support/Google/Chrome")
+        try rejects { _ = try Config.profileRoot(browser: "org.mozilla.firefox", home: "/tmp") }
+        try equal(route("http://[::1]:8080").directory, nil)
+        try equal(route("https://[2001:db8::1]/", try Config("[2001:db8::1] tars")).directory, "Profile 2")
+        for invalid in ["example..com", "-example.com", "example.com-", "[invalid]", "example.com:443"] {
+            try rejects { _ = try canonicalHost(invalid) }
+        }
+        try equal(try canonicalHost("bücher.de"), "xn--bcher-kva.de")
+        try rejects { _ = try Config("@browser org.mozilla.firefox\n@fallback Work") }
+        try rejects { _ = try Config("@browser org.mozilla.firefox\nexample.com Work") }
+        try rejects { _ = try Config("@browser org.mozilla.firefox") }
+        let mixed = try Config("@fallback com.google.Chrome::personal\ngithub.com net.imput.helium::tars\nyoutube.com com.brave.Browser::")
+        try equal(route("https://github.com", mixed).browser, "net.imput.helium")
+        try equal(route("https://github.com", mixed).directory, "Profile 2")
+        try equal(route("https://example.com", mixed).browser, "com.google.Chrome")
+        try equal(route("https://example.com", mixed).directory, "Default")
+        try equal(route("https://youtube.com", mixed).browser, "com.brave.Browser")
+        try equal(route("https://youtube.com", mixed).directory, nil)
+        let selectedBrowser = try planRoute("https://example.com", config: mixed) { browser in
+            try equal(browser, "com.google.Chrome")
+            return [.init(directory: "Profile 7", name: "personal")]
+        }
+        try equal(selectedBrowser.directory, "Profile 7")
+        try rejects { _ = try Config("example.com unknown.browser::Work") }
+        try rejects { _ = try Config("example.com com.google.Chrome::Work::Extra") }
+        try rejects { _ = try validatedURL("file://remote/tmp/file") }
+        try rejects { _ = try parseProfiles(Data(#"{"profile":{"info_cache":{"../bad":{"name":"Work"}}}}"#.utf8)) }
         print("core tests passed")
     }
 }
