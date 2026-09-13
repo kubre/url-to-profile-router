@@ -24,6 +24,8 @@ Choose **Set as Default Browser** from the menu bar icon, or run:
 
 Edit `~/.config/url-router.conf`, or choose **Edit Rules** from the menu. Changes apply to the next link.
 
+Links are handed to an already running browser over its singleton socket, so no new browser process starts per link. **Open at Login** keeps the router resident.
+
 ```text
 @browser net.imput.helium
 @fallback Personal

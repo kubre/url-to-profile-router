@@ -1,5 +1,6 @@
 import AppKit
 import CoreServices
+import ServiceManagement
 import UniformTypeIdentifiers
 import Foundation
 
@@ -8,6 +9,19 @@ let home = NSHomeDirectory()
 let configURL = URL(fileURLWithPath: home + "/.config/url-router.conf")
 let templateURL = Bundle.main.url(forResource: "rules", withExtension: "conf")
 let bundleURL = Bundle.main.bundleURL
+
+final class FileCache<T> {
+    private var entries: [String: (Date, T)] = [:]
+    func value(at path: String, load: () throws -> T) throws -> T {
+        let modified = (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? .distantPast
+        if let (stamp, stored) = entries[path], stamp == modified { return stored }
+        let loaded = try load()
+        entries[path] = (modified, loaded)
+        return loaded
+    }
+}
+let configCache = FileCache<Config>()
+let profileCache = FileCache<[BrowserProfile]>()
 
 func createConfigIfMissing() throws {
     if fm.fileExists(atPath: configURL.path) { return }
@@ -23,8 +37,10 @@ func loadConfig(create: Bool = false) throws -> Config {
         guard let templateURL else { throw RouterError("bundled rules.conf is missing; reinstall the app") }
         return try Config(String(contentsOf: templateURL, encoding: .utf8), source: templateURL.path)
     }
-    do { return try Config(String(contentsOf: configURL, encoding: .utf8), source: configURL.path) }
-    catch { throw RouterError("cannot load \(configURL.path): \(error.localizedDescription)") }
+    return try configCache.value(at: configURL.path) {
+        do { return try Config(String(contentsOf: configURL, encoding: .utf8), source: configURL.path) }
+        catch { throw RouterError("cannot load \(configURL.path): \(error.localizedDescription)") }
+    }
 }
 
 func browserURL(_ browser: String) throws -> URL {
@@ -38,8 +54,41 @@ func browserURL(_ browser: String) throws -> URL {
 
 func profiles(_ browser: String) throws -> [BrowserProfile] {
     let state = try Config.profileRoot(browser: browser, home: home).appendingPathComponent("Local State")
-    do { return try parseProfiles(Data(contentsOf: state)) }
-    catch { throw RouterError("\(state.path): \(error.localizedDescription)") }
+    return try profileCache.value(at: state.path) {
+        do { return try parseProfiles(Data(contentsOf: state)) }
+        catch { throw RouterError("\(state.path): \(error.localizedDescription)") }
+    }
+}
+
+func notifyRunningBrowser(_ browser: String, app: URL, args: [String]) -> Bool {
+    guard let root = try? Config.profileRoot(browser: browser, home: home),
+          let cookie = try? fm.destinationOfSymbolicLink(atPath: root.appendingPathComponent("SingletonCookie").path),
+          let socketPath = try? fm.destinationOfSymbolicLink(atPath: root.appendingPathComponent("SingletonSocket").path),
+          socketPath.utf8.count < 104,
+          (try? fm.destinationOfSymbolicLink(atPath: (socketPath as NSString).deletingLastPathComponent + "/SingletonCookie")) == cookie,
+          let executable = Bundle(url: app)?.executableURL else { return false }
+
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    var timeout = timeval(tv_sec: 2, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: socketPath.utf8) }
+    let connected = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+    }
+    guard connected == 0 else { return false }
+
+    let message = Array((["START", "/", executable.path] + args).joined(separator: "\0").utf8)
+    guard message.withUnsafeBufferPointer({ send(fd, $0.baseAddress, $0.count, 0) }) == message.count,
+          shutdown(fd, SHUT_WR) == 0 else { return false }
+    var reply = [UInt8](repeating: 0, count: 8)
+    guard recv(fd, &reply, reply.count, 0) == 3, String(decoding: reply.prefix(3), as: UTF8.self) == "ACK" else { return false }
+    NSRunningApplication.runningApplications(withBundleIdentifier: browser).first?.activate(options: [])
+    return true
 }
 
 func checkedRoute(_ text: String, cfg: Config, profiles: (String) throws -> [BrowserProfile]) throws -> Route {
@@ -64,14 +113,10 @@ func defaultHandler(_ scheme: String) -> String? {
 
 func report(_ cfg: Config) throws -> String {
     var lines = ["OK: \(cfg.rules.count) rules", "Default browser: \(cfg.browser)"]
-    var cache: [String: [BrowserProfile]] = [:]
     for value in [nil, cfg.fallback] + cfg.rules.map({ Optional($0.profile) }) {
         let destination = try cfg.destination(value)
         _ = try browserURL(destination.browser)
-        if let name = destination.profile {
-            if cache[destination.browser] == nil { cache[destination.browser] = try profiles(destination.browser) }
-            _ = try resolveProfile(name, profiles: cache[destination.browser] ?? [])
-        }
+        if let name = destination.profile { _ = try resolveProfile(name, profiles: try profiles(destination.browser)) }
     }
     for scheme in ["http", "https"] {
         let handler = defaultHandler(scheme)
@@ -97,6 +142,15 @@ func setDefault() throws {
             throw RouterError("macOS did not change the \(scheme) handler; select URL to Profile Router in System Settings > Desktop & Dock > Default web browser")
         }
     }
+    try? SMAppService.mainApp.register()
+}
+
+func alert(_ title: String, _ text: String) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = text
+    NSApp.activate(ignoringOtherApps: true)
+    alert.runModal()
 }
 
 func err(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
@@ -123,6 +177,9 @@ final class Delegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Set as Default Browser", action: #selector(setAsDefault), keyEquivalent: "d").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Edit Rules…", action: #selector(editRules), keyEquivalent: ",").target = self
+        let login = menu.addItem(withTitle: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        login.target = self
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit URL to Profile Router", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
@@ -132,20 +189,15 @@ final class Delegate: NSObject, NSApplicationDelegate {
     @objc func setAsDefault() {
         do {
             try setDefault()
-            let alert = NSAlert()
-            alert.messageText = "Default browser updated"
-            alert.informativeText = "URL to Profile Router is now the default handler for http and https."
-            alert.addButton(withTitle: "OK")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "Could not set default"
-            alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "Close")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-        }
+            alert("Default browser updated", "URL to Profile Router is now the default handler for http and https.")
+        } catch { alert("Could not set default", error.localizedDescription) }
+    }
+
+    @objc func toggleLoginItem(_ item: NSMenuItem) {
+        do {
+            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }
+        } catch { alert("Could not update login item", error.localizedDescription) }
+        item.state = SMAppService.mainApp.status == .enabled ? .on : .off
     }
 
     @objc func editRules() {
@@ -154,13 +206,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
             let editor = NSWorkspace.shared.urlForApplication(toOpen: .plainText)
                 ?? URL(fileURLWithPath: "/System/Applications/TextEdit.app")
             NSWorkspace.shared.open([configURL], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "Cannot open rules"
-            alert.informativeText = error.localizedDescription
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-        }
+        } catch { alert("Cannot open rules", error.localizedDescription) }
     }
 
     func application(_ app: NSApplication, open urls: [URL]) {
@@ -170,19 +216,14 @@ final class Delegate: NSObject, NSApplicationDelegate {
     func route(_ inputs: [String]) {
         do {
             let cfg = try loadConfig(create: true)
-            var cache: [String: [BrowserProfile]] = [:]
-            func availableProfiles(_ browser: String) throws -> [BrowserProfile] {
-                if let stored = cache[browser] { return stored }
-                let value = try profiles(browser)
-                cache[browser] = value
-                return value
-            }
             for input in inputs {
                 do {
-                    let route = try checkedRoute(input, cfg: cfg, profiles: availableProfiles)
+                    let route = try checkedRoute(input, cfg: cfg, profiles: profiles)
                     var args = route.directory.map { ["--profile-directory=\($0)"] } ?? []
                     args += ["--", route.url.absoluteString]
-                    queue.append(Job(app: try browserURL(route.browser), urls: [route.url], args: args))
+                    let app = try browserURL(route.browser)
+                    if notifyRunningBrowser(route.browser, app: app, args: args) { continue }
+                    queue.append(Job(app: app, urls: [route.url], args: args))
                 } catch { failed.append((input, error.localizedDescription)) }
             }
             launchNext()
@@ -273,14 +314,8 @@ do {
     if dry {
         let cfg = try loadConfig()
         let samples = inputs.isEmpty ? ["https://github.com/foo", "https://youtube.com", "https://example.com"] : inputs
-        var cache: [String: [BrowserProfile]] = [:]
         for input in samples {
-            let route = try checkedRoute(input, cfg: cfg) { browser in
-                if let stored = cache[browser] { return stored }
-                let value = try profiles(browser)
-                cache[browser] = value
-                return value
-            }
+            let route = try checkedRoute(input, cfg: cfg, profiles: profiles)
             _ = try browserURL(route.browser)
             print("\(input) -> \(route.browser)::\(route.profile ?? "default") [\(route.directory ?? "last used")] (\(route.reason))")
         }
